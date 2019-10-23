@@ -1,0 +1,163 @@
+###简介：
+换肤本质上是使用外置资源替换程序中的包括图片、背景、字体、颜色、大小值等资源。
+
+### 换肤方案：
+1. 早期的换肤功能，需要安装相应的主题apk，该apk没有界面，仅仅是为了提供皮肤资源，通过应用间共享id来实现读取资源文件，缺点是需要安装apk，切换主题需要重启应用，用户可以在应用管理中卸载该apk，目前该种方式已经很少使用。
+2. 应用中内置所有主题的资源文件，缺点很明显，会增加应用apk包的体积，切换主题需要重启应用；
+3. 目前使用比较方便的方案，是通过下载资源包（实际上也是apk），但不需要安装，通过获取该apk的Resource来使用其资源文件，切换主题不需要重启应用；
+
+------------
+
+参考项目 [Android-Skin-Loader](https://github.com/stven0king/Android-Skin-Loader "Android-Skin-Loader")；
+原理：
+应用程序在编译阶段会给所有资源文件以及定义了@+id的控件一个id，这个id每次编译都会不同，但是资源名不会发生变化。
+换肤的原理就是，利用资源文件的id找到这个资源的文件名，再根据资源名去找皮肤包中对应的资源文件，通过 *Resources* 类加载资源文件并做替换；
+如 SkinManager.java类方法：
+```java
+public Drawable getDrawable(int resId) {
+        Drawable originDrawable = getContext().getResources().getDrawable(resId);
+        if (mResources == null || isDefaultSkin) {
+            return originDrawable;
+        }
+        String resName = getContext().getResources().getResourceEntryName(resId);
+        int trueResId = mResources.getIdentifier(resName, "drawable", skinPackageName);
+        Drawable trueDrawable = null;
+        try {
+            if (android.os.Build.VERSION.SDK_INT < 22) {
+                trueDrawable = mResources.getDrawable(trueResId);
+            } else {
+                trueDrawable = mResources.getDrawable(trueResId, null);
+            }
+        } catch (NotFoundException e) {
+            e.printStackTrace();
+            trueDrawable = originDrawable;
+        }
+        return trueDrawable;
+    }
+```
+
+### 实现：
+依据换肤原理，关键的问题就是找出需要替换资源的名称，项目中以使用动态方式为主，因为需要动态设置添加的控件居多。
+1. 静态方式：
+利用Android 的Api LayoutInflater.Factory 提供的方法在View创建时(layout文件)遍历View中的子控件，找到需要支持换肤的view，并记录下来需要替换的控件属性(background、color、src...)。
+    
+        public interface Factory2 extends LayoutInflater.Factory {
+            View onCreateView(View var1, String var2, Context var3, AttributeSet var4);
+        }
+    
+        public interface Factory {
+            View onCreateView(String var1, Context var2, AttributeSet var3);
+        }
+    
+  具体实现请参见SkinInflaterFactory类。
+  布局文件中使用如下：
+```xml
+   <merge xmlns:android="http://schemas.android.com/apk/res/android"
+           xmlns:skin="http://schemas.android.com/android/skin"
+           android:background="@color/transparent">
+
+        <View
+            android:id="@+id/divider"
+            android:layout_width="fill_parent"
+            android:layout_height="1.0px"
+            android:layout_alignParentTop="true"
+            android:background="@color/theme_tab_divider"
+            skin:enable="true"/>
+    ...
+   </merge>
+```
+
+2. 动态方式：
+不可避免，代码中会存在一些需要动态添加的View，此时在控件初始化，或者更新控件UI时，把需要支持换肤的view属性(background、color、src...)，并记录下来，
+代码如 NaviTabIndicatorView.java 类方法：
+        public void setTitleAndIcon(String title, @DrawableRes int iconRes) {
+            mTitleTextView.setText(title);
+    
+            if (getContext() instanceof IDynamicNewView) {
+                IDynamicNewView iDynamicNewView = (IDynamicNewView) getContext();
+                List<DynamicAttr> moreAttr = new ArrayList<DynamicAttr>();
+                moreAttr.add(new DynamicAttr(AttrFactory.SRC, iconRes));
+                iDynamicNewView.dynamicAddView(mIconImageView, moreAttr);
+                iDynamicNewView.applyDynamicViewSkin(mIconImageView);
+            } else
+                mIconImageView.setImageResource(iconRes);
+        }
+当用户选择切换主题时，执行更换皮肤，即遍历执行上面记录下来的view属性list，把对应皮肤包的Resource资源重新设置一遍。
+如 MainThemeHelper.java类方法，获取皮肤包中的颜色值：
+        public static int getStatusBarColor() {
+            if (ThemeManager.getInstance().hasCustomSkin())
+                return ThemeManager.getInstance().getColor(R.color.theme_system_status_bar_color);
+            else {
+                int color = Build.VERSION.SDK_INT >= Utils.ANDROID_VERSION_CODE.MARSHMALLOW ? R.color.color_ffffff : R.color.color_dcdcdc;
+                return ObjectStore.getContext().getResources().getColor(color);
+            }
+        }
+    
+
+### 知识点：
+1. 使用命名空间及自定义属性：
+`xmlns:skin="http://schemas.android.com/android/skin"`
+定义attr，在layout中支持换肤的view中添加：`skin:enable="true"`
+
+2. 定义需要的属性类，可以替换的属性包括：background、src、color、dimen、textsize、text...
+参考类：`BackgroundAttr、SrcAttr、TextColorAttr`等
+每一个基类对应一种属性，对应变量包括：属性名、id(R文件id)、名称(文件名或者控件名)、类型(background、color、src...)。
+
+3. 实现Factory类，并在需要支持换肤的Activity类的onCreate()方法执行时设置自定义Factory(须继承LayoutInflater.Factory2接口)，如：`LayoutInflaterCompat.setFactory2(new SkinInflaterFactory())`
+参见类：`SkinInflaterFactory`
+
+4. 定义接口`IDynamicNewView`，用来添加换肤View和执行换肤操作
+参见使用类：`NaviTabIndicatorView`，`ActionBarView`
+
+5. 关键实现类
+```
+SkinInflaterFactory：获取静态方式中支持换肤的控件，维护所有支持换肤控件的list，以及执行换肤操作。
+SkinManager：加载皮肤文件，从皮肤文件中获取对应的资源文件，维护需要设置主题的观察者，属于SDK层级，便于修改实现时不影响UI调用。
+ThemeManager：在SkinManager之上对调用者封装的一层对外接口类，属于App层级。功能包含初始化SDK，管理皮肤(提供对外使用主题的接口)，保存用户变量等。
+ThemeDownloadManager：提供皮肤的下载管理功能。
+ThemeItem：定义皮肤属性：id、fileUrl(文件地址)、md5(皮肤文件md5)、thumbUrl(缩略图)、startTime(主题生效时间)、endTime(主题失效时间)、priority(优先级)、languages(多语言)等等。
+```
+6. 皮肤更新通知机制
+观察者模式，管理需要支持换肤的类，通知其更新UI，替换资源文件。
+
+7. 资源命名
+最后一个非常关键的操作，该操作是所有皮肤功能可用的前提，规范换肤控件的命名，凡是皮肤包中使用的资源名，统一以 ***theme_*** 开头，
+如：`R.drawable.theme_main_actionbar_shareit_logo`、`R.color.theme_system_status_bar_color`等
+皮肤包中的资源名必须和换肤控件中对应的资源文件保持一致。并在编译生成apk文件时，保持文件名不被混淆，否则无法使用。
+在App Module下的文件proguard-res.xml中配置如下：
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<resproguard>
+...
+        <!-- Theme resource -->
+        <path value="com.lenovo.anyshare.gps.R.drawable.theme_*"/>
+        <path value="com.lenovo.anyshare.gps.R.color.theme_*"/>
+        <path value="com.lenovo.anyshare.gps.R.string.theme_*"/>
+        <path value="com.lenovo.anyshare.gps.R.dimen.theme_*"/>
+        <path value="com.lenovo.anyshare.gps.R.bool.theme_*"/>
+        <!-- Theme resource end-->
+...
+</resproguard>
+```
+
+8. UI展示
+ThemeSelectActivity 提供给用户选择设置的页面。
+
+9. 制作和发布皮肤
+工程ThemeFactory 用来制作皮肤，是只包含资源文件的项目，资源文件名与主项目中皮肤控件保持一致；
+需要把制作好的皮肤包、缩略图同步给后台同学，上传到资源库后，提供下载地址，在配置系统部署云控。
+
+
+### 使用
+按照上面的知识点做好准备。
+1. 初始化：
+`ThemeManager.getInstance().initTheme(context)`
+初始化必须保证在程序启动后时机比较靠前，否则可能造成在UI可见后才更换皮肤，用户体验很差。
+初始化的操作，会触发自动设置生效中的皮肤，检查当前不可用的皮肤包并清除。
+2. 在BaseActivity中实现方法，在有换肤控件的子Activity中实现 initSkinInflaterFactory()、动态添加皮肤控件方法、设置皮肤更新的方法；
+以及添加观察者`ThemeManager.getInstance().attach(this);`
+3. 在BaseFragment中实现接口 IDynamicNewView mIDynamicNewView;
+4. 在layout中定义静态方式实现，在需要动态更新的皮肤控件处使用动态方式添加代码；
+5. 实现下载机制 ThemeDownloadManager，皮肤文件下载目录也可在该类中修改；
+6. 在用户选择或自动下载皮肤生效时，调用设置主题(保证本地已经有皮肤包文件)，以及设置结果回调通知接口，
+`SkinManager.getInstance().load(file.getAbsolutePath(), listener)`
